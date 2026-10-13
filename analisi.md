@@ -75,96 +75,105 @@ Sul polso la pelle è più spessa e i capillari sono meno superficiali. In più 
 
 ## 3. Architettura: dove si analizzano i dati?
 
-Il brainstorming contiene **due varianti**. Qui vengono messe a confronto, più una terza (ibrida) che le unisce.
+### 3.1 Ripartizione Hardware dell'Infrastruttura
+Il progetto sfrutta un'infrastruttura distribuita a tre nodi fisici complementari:
 
-### 3.1 Alternativa A – Smartphone Android (BLE)
-
-```mermaid
-flowchart LR
-    S["MAX30102 sul polso"] -->|I2C| E["ESP32 nel polsino"]
-    E -->|"BLE: stream SpO2/HR"| A["App Android"]
-    M["Microfono smartphone"] --> A
-    A -->|"Inferenza TFLite: russamento"| A
-    A -->|"BLE: comando VIBRA"| E
-    A --> DB[("DB locale: SQLite/Room")]
-```
-
-- **Polsino → telefono:** stream SpO2/HR via **Bluetooth Low Energy**.
-- **Telefono:** ascolta dal proprio microfono e classifica l'audio con **TensorFlow Lite** (YAMNet con fine-tuning, quantizzato a 8 bit).
-- **Decisione e comando:** il telefono decide e invia via BLE il comando di vibrazione.
-- **Dati:** salvati in locale (SQLite/Room) e al mattino visualizzati nell'app o esportati (CSV/JSON).
-- **Sviluppo:** Kotlin nativo oppure Flutter (cross-platform).
-
-### 3.2 Alternativa B – Computer in rete locale (Wi-Fi + MQTT)
-
-```mermaid
-flowchart LR
-    S["MAX30102 + INMP441"] --> E["ESP32 nel polsino"]
-    E -->|"Wi-Fi LAN, MQTT/TLS<br/>topic polsino/salute/spo2"| B["Broker Mosquitto sul PC"]
-    B --> P["Subscriber Python<br/>IA audio + regole SpO2"]
-    P -->|"MQTT: comando VIBRA"| B
-    B --> E
-    P --> DB[("MongoDB / InfluxDB")]
-    DB --> R["Analisi in R<br/>ML + dashboard"]
-```
-
-- **Polsino → PC:** il polsino è un dispositivo IoT autonomo che **pubblica** i dati via MQTT su un broker **Mosquitto** (anche in Docker) che gira sul PC.
-- **PC:** uno script **Python** è sottoscritto al topic, elabora i dati, classifica l'audio, salva nel DB NoSQL e pubblica il comando di vibrazione.
-- **Il problema dell'audio:** il PC sta in un'altra stanza. Ci sono due soluzioni:
-  - **Hardware:** microfono INMP441 sul polsino, che invia al PC feature audio (es. MFCC) e non audio grezzo;
-  - **Simulazione:** si usa un file audio pre-registrato (dataset di test), sincronizzato con lo stream SpO2. È la strada più rapida per l'esame.
-- **Variante semplificata:** se il PC è in camera, Python può ricevere i dati anche via **BLE** (libreria `bleak`) e usare un microfono USB, senza Wi-Fi.
-
-### 3.3 Confronto
-
-| Criterio | A – Smartphone Android | B – PC (Wi-Fi/MQTT) |
-|---|---|---|
-| Consumo del polsino | ✅ Basso (BLE) | ⚠️ Alto: Wi-Fi continuo ≈ 80–100 mA, oltre la capacità di una LiPo da 400 mAh per 8 h. Serve **batching** + modem-sleep |
-| Audio | ✅ Microfono del telefono, vicino al letto | ⚠️ Serve un microfono sul polsino (sotto le coperte, qualità bassa) oppure la simulazione |
-| Complessità di sviluppo | ⚠️ App mobile + BLE + TFLite | ✅ Python, più semplice da prototipare e da debuggare |
-| Valore "Big Data" | Medio: edge AI, ma storage limitato | ✅ Alto: MQTT, data ingestion, NoSQL, R, dashboard |
-| Valore giuridico | ✅ Dati sul dispositivo personale, minimizzazione | ✅ Nessun cloud, LAN cifrata, nessun trasferimento extra-UE |
-| Tolleranza ai guasti | Distanza BLE, telefono acceso tutta la notte | Wi-Fi instabile: buffer su ESP32 + reinvio in batch |
-| Portabilità (es. in viaggio) | ✅ Alta | ❌ Serve un PC acceso |
-
-### 3.4 ✅ Raccomandazione: architettura ibrida (Lambda in miniatura)
-
-Le due alternative **non si escludono**. Unite, formano l'architettura più adatta all'esame di Big Data:
-
-```mermaid
-flowchart TB
-    subgraph EDGE["Edge"]
-        E["Polsino ESP32<br/>SpO2, HR, vibrazione"]
-    end
-    subgraph SPEED["Speed Layer: tempo reale, notte"]
-        A["Smartphone Android<br/>TFLite + regole SpO2"]
-    end
-    subgraph BATCH["Batch Layer: differito, mattino"]
-        DB[("NoSQL su PC<br/>MongoDB / InfluxDB")]
-        R["R: ML predittivo"]
-        V["Dashboard<br/>ggplot2 / Shiny"]
-    end
-    E <-->|BLE| A
-    A -->|"Sync in Wi-Fi LAN al mattino<br/>MQTT/HTTPS, solo dati pseudonimizzati"| DB
-    DB --> R --> V
-```
-
-- **Speed layer (smartphone):** reazione immediata con latenza minima, consumo basso, audio di buona qualità.
-- **Batch layer (PC):** storico di più notti, NoSQL, machine learning in R e visualizzazione.
-- **Ripiego:** se lo sviluppo dell'app Android è troppo oneroso, si adotta la **variante B con audio simulato**. Il PC fa entrambi i layer e lo smartphone resta come estensione futura.
+1. **MacBook Air M1 (8GB RAM):**
+   * *Ruolo:* **Workstation di Sviluppo & Client**.
+   * *Funzioni:* Scrittura codice C++ (firmware ESP32), sviluppo app Android (Kotlin), stesura relazioni accademiche in Markdown/LaTeX, interfaccia di monitoraggio Git e prototipazione rapida.
+2. **Smartphone Android – Fairphone 5 (8GB RAM, SoC Qualcomm QCM6490 Octa-core):**
+   * *Ruolo:* **Edge Gateway Notturno (Speed Layer)**.
+   * *Specifiche & Vantaggi:* 
+     - **Hardware:** Chip Qualcomm QCM6490 con NPU Hexagon integrata (perfetta per accelerare l'inferenza TFLite int8 a bassissimo consumo), Bluetooth 5.2 Low Energy nativo.
+     - **Affidabilità OS:** Android pulito privo di killer-process aggressivi tipici di altri brand, fondamentale per garantire l'esecuzione ininterrotta del *Foreground/Background Service* di campionamento durante le 8 ore notturne.
+     - **Valore Etico & Giuridico:** Il Fairphone è il punto di riferimento europeo per sostenibilità, diritto alla riparazione (*Right to Repair*), modularità e trasparenza hardware, coerente con l'approccio di etica delle tecnologie e Privacy by Design analizzato nella relazione giuridica.
+   * *Funzioni:* Posizionato sul comodino, riceve lo streaming BLE dal polsino, campiona l'audio dal microfono incorporato, esegue l'inferenza AI on-device ed emette il comando di vibrazione in caso di allerta.
+3. **Acer Veriton GB10 Blackwell (128GB RAM, 4TB NVMe SSD, DGX OS basato su Ubuntu):**
+   * *Ruolo:* **AI Training Server & On-Premises Big Data Engine (Batch Layer)**.
+   * *Funzioni:* Addestramento/Fine-tuning avanzato su GPU Blackwell (tecnica QLoRA), cluster Hadoop/HDFS in Docker, database NoSQL (MongoDB/InfluxDB), elaborazione in-memory in R su grandi volumi di dati clinici e hosting della dashboard Shiny.
 
 ---
 
-## 4. Logica di rilevamento
+### 3.2 Diagramma dell'Architettura Ibrida a Tre Livelli
 
-### 4.1 Russamento (IA audio)
-- **Modello di partenza:** **YAMNet** (pre-addestrato su AudioSet). In alternativa, AST.
-- **Fine-tuning** in Python (TensorFlow/Keras) con un layer Dense finale. I dati vengono da:
-  - registrazioni personali;
-  - **AudioSet** (classe *Snoring*), **ESC-50** (classe *snoring*);
-  - esempi negativi: ventilatore, traffico, respiro normale, voci.
-- **Conversione** in `.tflite` quantizzato int8 (alternativa A) o uso diretto in Python (alternativa B).
-- **Trigger:** classe *Snoring* con confidenza > 85% su più finestre consecutive, per evitare falsi positivi.
+```mermaid
+flowchart TB
+    subgraph WEARABLE["1. Wearable Layer (Stanza da letto)"]
+        E["Polsino ESP32-C3<br/>MAX30102 + IMU + Motore"]
+    end
+
+    subgraph SPEED["2. Speed Layer (Smartphone Android)"]
+        A["App Android (Background Service)<br/>Microfono locale<br/>Modello TFLite quantizzato int8<br/>Decision Rule Engine (SpO2 + Audio)"]
+    end
+
+    subgraph BATCH["3. Batch Layer & Training (Server Veriton Blackwell - DGX OS)"]
+        direction TB
+        GPU["GPU NVIDIA Blackwell<br/>Fine-tuning QLoRA su Dataset Audio"]
+        TRAIN["Esportazione TFLite int8"]
+        DB[("Time-Series & NoSQL DB<br/>128 GB RAM In-Memory")]
+        HADOOP["Hadoop / MapReduce Job<br/>Calcolo Metriche ODI / AHI"]
+        R_ENV["Ambiente R (caret, PCA, k-means)<br/>Dashboard Shiny"]
+    end
+
+    E <-->|"BLE 5.0 (Stream SpO2/HR + Feedback Vibra)"| A
+    GPU -->|"Deploy modello ottimizzato"| TRAIN --> A
+    A -->|"Sincronizzazione LAN Wi-Fi (mattino)"| DB
+    DB --> HADOOP
+    DB --> R_ENV
+```
+
+---
+
+### 3.3 Confronto delle Alternative di Esecuzione
+
+| Criterio | A – Solo Smartphone | B – Solo PC LAN (Wi-Fi) | C – Architettura Ibrida a 3 Livelli (Adottata) |
+|---|---|---|---|
+| **Consumo Polsino** | Basso (BLE) | Alto (Wi-Fi continuo) | ✅ **Minimo:** BLE verso telefono; Wi-Fi disattivato sul polsino |
+| **Qualità Audio** | Ottima (telefono vicino) | Scarsa (sul polsino) | ✅ **Ottima:** campionamento comodino via Android |
+| **Capacità Big Data** | Molto limitata (storage phone) | Media (laptop) | ✅ **Massima:** 128 GB RAM + 4 TB SSD sul server Veriton |
+| **Capacità Training AI** | Nulla (solo inferenza) | Limitata (CPU M1) | ✅ **Enterprise:** Accelerazione GPU Blackwell |
+| **Privacy / Sovranità** | Isolato sul telefono | Rete locale | ✅ **Air-Gapped On-Premises:** nessun dato esce su Cloud terzi |
+
+---
+
+## 4. Logica di rilevamento e AI
+
+### 4.1 Rilevamento Russamento: Specializzazione tramite Fine-Tuning QLoRA
+
+Per distinguere accuratamente il russamento da suoni notturni confondenti (respiro profondo, tosse, coperte, rumore del condizionatore o traffico urbano), si adotta una pipeline di Machine Learning basata sulle più moderne tecniche di **Parameter-Efficient Fine-Tuning (PEFT)**:
+
+```
+[ Dataset Audio: ESC-50, AudioSet + Campioni Notturni ]
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Server Veriton Blackwell (DGX OS / Ubuntu - 128 GB RAM)    │
+│  1. Caricamento Modello Backbone Audio in 4-bit (NF4)       │
+│  2. Iniezione Adattatori Low-Rank (LoRA, r=16, alpha=32)    │
+│  3. QLoRA Fine-Tuning supervisionato su spettrogrammi audio │
+│  4. Validazione metriche (F1-score, Precision, Recall)      │
+│  5. Merge dei pesi LoRA nel backbone                        │
+│  6. Quantizzazione Post-Training (PTQ) -> int8 TFLite       │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼ (Deploy file .tflite ~5-15 MB)
+┌─────────────────────────────────────────────────────────────┐
+│  Smartphone Android (Inferenza locale real-time in RAM)     │
+│  Latenza < 50 ms per finestra temporale di 0.975 s          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Perché QLoRA (*Quantized Low-Rank Adaptation*)?
+1. **Efficienza e Precisione:** QLoRA congela il modello di base quantizzato a 4 bit (NormalFloat4) e addestra unicamente piccole matrici di adattamento a basso rango ($A$ e $B$) sui moduli di attenzione. Questo azzera il degrado di precisione (*catastrophic forgetting*) mantenendo l'impronta di memoria contenuta durante l'addestramento.
+2. **Modelli candidati:** 
+   * **Audio Spectrogram Transformer (AST)** o backbone audio convoluzionali/transformer (**YAMNet / Conformer / Whisper-encoder**).
+   * Gli spettrogrammi Mel (frequenze acustiche tempo-varianti) vengono processati estraendo feature ad alta fedeltà.
+3. **Pipeline di Compressione per l'Edge:**
+   * Una volta completato il fine-tuning sul server Blackwell, i pesi LoRA vengono uniti (*merged*) con il modello originale.
+   * Il modello unificato viene convertito ed esportato in formato **TensorFlow Lite (`.tflite`) con quantizzazione completa int8**, ottimizzata per le CPU ARM dei dispositivi Android (consumo batteria trascurabile durante la notte).
+4. **Logica di Trigger:**
+   * Finestra temporale di campionamento: ~1 secondo.
+   * Trigger positivo: classificazione della classe *Snoring* con probabilità $P > 0.85$ per almeno 2 finestre consecutive (filtro anti-falsi positivi).
 
 ### 4.2 Apnea (SpO2)
 - **Regola del brainstorming:** SpO2 < 90% per 8–10 s.
@@ -275,17 +284,20 @@ flowchart LR
 
 È un esercizio identico a quelli che possono capitare allo scritto.
 
-### 5.5 L'esperimento (il "valore aggiunto" per la Lode)
+### 5.5 L'esperimento e la simulazione su larga scala (Server Veriton Blackwell)
 
-- **Disegno:** N notti con vibrazione **attiva** e N notti con vibrazione **disattivata** (solo registrazione), alternate.
-- **Ipotesi:** la vibrazione riduce i minuti di russamento per ora e/o l'ODI.
-- **Analisi in R:** statistica descrittiva, test d'ipotesi (t-test o Wilcoxon), dimensione dell'effetto, grafici.
-- **Limiti da dichiarare:**
-  - è un **auto-esperimento** su un solo soggetto (N = 1);
-  - non c'è valore clinico;
-  - il sensore sul polso non è validato.
+Grazie alla disponibilità della workstation **Acer Veriton GB10 Blackwell (128 GB RAM, 4 TB NVMe SSD, DGX OS)**, il progetto può spingersi ben oltre il singolo auto-esperimento:
 
-> Se mancano notti reali, si possono integrare **dataset pubblici** (es. PhysioNet, citando la licenza) o un **dataset sintetico** dichiarato come tale.
+1. **Auto-esperimento sul campo:**
+   * N notti con vibrazione attiva e N notti con vibrazione disattivata (solo logging), alternate.
+   * Ipotesi: la vibrazione riduce significativamente la durata del russamento e l'indice ODI.
+   * Analisi statistica inferenziale in R: test t di Student / Wilcoxon rank-sum test, effect size (Cohen's d) e grafici a violino/box-plot.
+2. **Benchmark su Dataset Clinici di Popolazione (PhysioNet):**
+   * Il server Veriton permette di scaricare e caricare in-memory dataset massivi di polisonnografia clinica reale (es. **PhysioNet Sleep-EDF**, **SHHS - Sleep Heart Health Study**, decine di Gigabyte).
+   * Esecuzione di benchmark comparativi: confronto tra l'algoritmo di stima ODI/apnea sviluppato nel progetto e le annotazioni cliniche polisonnografiche ufficiali eseguite dai medici specialisti.
+3. **Elaborazione Parallela In-Memory in R & MapReduce:**
+   * Sfruttamento dei **128 GB di RAM** per elaborare time-series di migliaia di notti senza swapping su disco (argomento centrale della Lezione 5 sugli In-Memory DB).
+   * Esecuzione di job MapReduce scalabili in container Docker su DGX OS per dimostrare la fattibilità dell'architettura su una popolazione estesa di pazienti.
 
 ### 5.6 Le 10 slide (sintesi della relazione)
 
@@ -387,6 +399,12 @@ Il programma del corso si articola in **4 aree concettuali** (19 videolezioni to
   - *Art. 615-bis c.p.* (Interferenze illecite nella vita privata): rischio legato a registrazioni sonore non autorizzate nel domicilio; scongiurato dall'assenza di registrazione fisica di flussi audio.
   - *Art. 617-quater c.p.* (Intercettazione illecita di comunicazioni informatiche): motivazione dell'uso di cifratura sul canale BLE/Wi-Fi.
 - **Computer Forensics:** applicazione dei principi di integrità (hashing SHA-256) nella memorizzazione dei log di evento del polsino, per garantire la catena di custodia e l'utilizzabilità come prova informatica in caso di contenziosi.
+
+#### D. Sovranità Digitale e "Private On-Premises Health Cloud"
+- **Isolamento Air-Gapped su Server Veriton (DGX OS):**
+  - La presenza del server domestico dedicato (Acer Veriton 128 GB) permette di implementare un'architettura **Private Cloud On-Premises**.
+  - **Eliminazione del trasferimento transfrontaliero:** I dati sanitari non transitano né risiedono su server di cloud provider commerciali extracomunitari (AWS, Azure, Google Cloud). Viene azzerata alla radice la complessa problematica del trasferimento di dati verso Paesi terzi (Capo V GDPR, dottrina *Schrems II* ed *EU-US Data Privacy Framework*).
+  - **Data Breach Containment (art. 33-34 GDPR):** L'assenza di endpoint esposti su Internet pubblico riduce drasticamente la superficie di attacco, garantendo il pieno controllo fisico e logico delle chiavi crittografiche da parte dell'utente.
 
 ---
 
